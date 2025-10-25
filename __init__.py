@@ -1,598 +1,460 @@
-# SPDX-FileCopyrightText: 2014-2023 Blender Foundation
-#
-# SPDX-License-Identifier: GPL-2.0-or-later
+bl_info = {
+    "name": "DXF Import Pro",
+    "author": "moshi",
+    "version": (1, 0, 0),
+    "blender": (3, 0, 0),
+    "location": "File > Import > DXF (.dxf)",
+    "description": "Advanced DXF importer with support for layers, blocks, text, and precise geometry",
+    "warning": "",
+    "doc_url": "https://github.com/moshi/import_autocad_dxf_format_dxf",
+    "tracker_url": "https://github.com/moshi/import_autocad_dxf_format_dxf/issues",
+    "category": "Import-Export",
+}
 
 import bpy
 import os
-from bpy.props import StringProperty, BoolProperty, EnumProperty, IntProperty, FloatProperty, CollectionProperty
-from .dxfimport.do import Do, Indicator
-from .transverse_mercator import TransverseMercator
+import sys
+import subprocess
+import importlib
 from pathlib import Path
-
-try:
-    from pyproj import Proj, transform
-    PYPROJ = True
-except:
-    PYPROJ = False
-
-proj_none_items = (
-    ('NONE', "None", "No Coordinate System is available / will be set"),
+from bpy_extras.io_utils import ImportHelper
+from bpy.props import (
+    StringProperty,
+    BoolProperty,
+    FloatProperty,
+    EnumProperty,
+    PointerProperty,
 )
-proj_user_items = (
-    ('USER', "User Defined", "Define the EPSG code"),
-)
-proj_tmerc_items = (
-    ('TMERC', "Transverse Mercator", "Mercator Projection using a lat/lon coordinate as its geo-reference"),
-)
-proj_epsg_items = (
-    ('EPSG:4326', "WGS84", "World Geodetic System 84; default for lat / lon; EPSG:4326"),
-    ('EPSG:3857', "Spherical Mercator", "Webbrowser mapping service standard (Google, OpenStreetMap, ESRI); EPSG:3857"),
-    ('EPSG:27700', "National Grid U.K",
-                   "Ordnance Survey National Grid reference system used in Great Britain; EPSG:27700"),
-    ('EPSG:2154', "France (Lambert 93)", "Lambert Projection for France; EPSG:2154"),
-    ('EPSG:5514', "Czech Republic & Slovakia", "Coordinate System for Czech Republic and Slovakia; EPSG:5514"),
-    ('EPSG:5243', "LLC Germany", "Projection for Germany; EPSG:5243"),
-    ('EPSG:28992', "Amersfoort Netherlands", "Amersfoort / RD New -- Netherlands; EPSG:28992"),
-    ('EPSG:21781', "Swiss CH1903 / LV03", "Switzerland and Lichtenstein; EPSG:21781"),
-    ('EPSG:5880', "Brazil Polyconic", "Cartesian 2D; Central, South America; EPSG:5880 "),
-    ('EPSG:42103', "LCC USA", "Lambert Conformal Conic Projection; EPSG:42103"),
-    ('EPSG:3350', "Russia: Pulkovo 1942 / CS63 zone C0", "Russian Federation - onshore and offshore; EPSG:3350"),
-    ('EPSG:22293', "Cape / Lo33 South Africa", "South Africa; EPSG:22293"),
-    ('EPSG:27200', "NZGD49 / New Zealand Map Grid", "NZGD49 / New Zealand Map Grid; EPSG:27200"),
-    ('EPSG:3112', "GDA94 Australia Lambert", "GDA94 / Geoscience Australia Lambert; EPSG:3112"),
-    ('EPSG:24378', "India zone I", "Kalianpur 1975 / India zone I; EPSG:24378"),
-    ('EPSG:2326', "Hong Kong 1980 Grid System", "Hong Kong 1980 Grid System; EPSG:2326"),
-    ('EPSG:3414', "SVY21 / Singapore TM", "SVY21 / Singapore TM; EPSG:3414"),
-)
+from bpy.types import Operator, Panel, PropertyGroup, AddonPreferences
+import importlib.util
+import tempfile
+import traceback
+from typing import Dict, Any, Optional, List, Tuple, Set, Union
 
-proj_epsg_dict = {e[0]: e[1] for e in proj_epsg_items}
+# Check for required dependencies
+REQUIRED_PACKAGES = [
+    'ezdxf>=1.3.0',
+    'pyproj>=3.0.0',
+]
 
-BY_LAYER = 0
-BY_DXFTYPE = 1
-BY_CLOSED_NO_BULGE_POLY = 2
-SEPARATED = 3
-LINKED_OBJECTS = 4
-GROUP_INSTANCES = 5
-BY_BLOCKS = 6
-
-merge_map = {"BY_LAYER": BY_LAYER, "BY_TYPE": BY_DXFTYPE,
-             "BY_CLOSED_NO_BULGE_POLY": BY_CLOSED_NO_BULGE_POLY, "BY_BLOCKS": BY_BLOCKS}
-
-T_Merge = True
-T_ImportText = True
-T_ImportLight = True
-T_ExportAcis = False
-T_MergeLines = True
-T_OutlinerGroups = True
-T_Bbox = True
-T_CreateNewScene = False
-T_Recenter = False
-T_ThicknessBevel = True
-T_import_atts = True
-T_Collection = False
-
-RELEASE_TEST = False
-DEBUG = False
+# Import the DXF importer and constants
+from .dxfimport.importer.dxf_importer import DXFImporter, BY_LAYER, BY_BLOCK, SEPARATED, BY_CLOSED_NO_BULGE_POLY
 
 
-def is_ref_scene(scene):
-    return "latitude" in scene and "longitude" in scene
-
-
-def read(report, filename, obj_merge=BY_LAYER, import_text=True, import_light=True, export_acis=True, merge_lines=True,
-         do_bbox=True, block_rep=LINKED_OBJECTS, new_scene=None, new_collection=None, recenter=False, projDXF=None, projSCN=None,
-         thicknessWidth=True, but_group_by_att=True, dxf_unit_scale=1.0):
-    # import dxf and export nurbs types to sat/sab files
-    # because that's how autocad stores nurbs types in a dxf...
-    do = Do(filename, obj_merge, import_text, import_light, export_acis, merge_lines, do_bbox, block_rep, recenter,
-            projDXF, projSCN, thicknessWidth, but_group_by_att, dxf_unit_scale)
-
-    errors = do.entities(Path(filename.name).stem, new_scene, new_collection)
-
-    # display errors
-    for error in errors:
-        report({'ERROR', 'INFO'}, error)
-
-    # inform the user about the sat/sab files
-    if len(do.acis_files) > 0:
-        report({'INFO'}, "Exported %d NURBS objects to sat/sab files next to your DXF file" % len(do.acis_files))
-
-
-def display_groups_in_outliner():
-    outliners = (a for a in bpy.context.screen.areas if a.type == "OUTLINER")
-    for outliner in outliners:
-        pass
-        #outliner.spaces[0].display_mode = "GROUPS"
-
-
-# Update helpers (must be globals to be re-usable).
-def _update_use_georeferencing_do(self, context):
-    if not self.create_new_scene:
-        scene = context.scene
-        # Try to get Scene SRID (ESPG) data from current scene.
-        srid = scene.get("SRID", None)
-        if srid is not None:
-            self.internal_using_scene_srid = True
-            srid = srid.upper()
-            if srid == 'TMERC':
-                self.proj_scene = 'TMERC'
-                self.merc_scene_lat = scene.get('latitude', 0)
-                self.merc_scene_lon = scene.get('longitude', 0)
-            else:
-                if srid in (p[0] for p in proj_epsg_items):
-                    self.proj_scene = srid
-                else:
-                    self.proj_scene = 'USER'
-                    self.epsg_scene_user = srid
+def check_dependencies():
+    """Check if all required packages are installed.
+    
+    Returns:
+        list: List of missing package requirements
+    """
+    missing = []
+    
+    for package in REQUIRED_PACKAGES:
+        # Extract package name and version requirements
+        if '>=' in package:
+            pkg_name, req_version = package.split('>=')
+            pkg_name = pkg_name.strip()
+            req_version = tuple(map(int, req_version.split('.')))
         else:
-            self.internal_using_scene_srid = False
-    else:
-        self.internal_using_scene_srid = False
+            pkg_name = package.split('==')[0].strip()
+            req_version = None
+        
+        # First try pkg_resources for more accurate version checking
+        try:
+            import pkg_resources
+            try:
+                installed = pkg_resources.get_distribution(pkg_name)
+                if req_version:
+                    installed_version = tuple(map(int, installed.version.split('.')))
+                    if installed_version < req_version:
+                        missing.append(f"{pkg_name}>={'.'.join(map(str, req_version))} (installed: {installed.version})")
+                continue  # Package is installed with correct version
+            except pkg_resources.DistributionNotFound:
+                missing.append(package)
+                continue
+            except Exception as e:
+                print(f"Error checking {pkg_name}: {e}")
+        except ImportError:
+            pass  # pkg_resources not available, fall through to importlib
+        
+        # Fallback to importlib if pkg_resources fails
+        try:
+            module = importlib.import_module(pkg_name)
+            if req_version and hasattr(module, '__version__'):
+                installed_version = tuple(map(int, module.__version__.split('.')))
+                if installed_version < req_version:
+                    missing.append(f"{pkg_name}>={'.'.join(map(str, req_version))} (installed: {module.__version__})")
+        except ImportError:
+            missing.append(package)
+        except Exception as e:
+            print(f"Error checking {pkg_name}: {e}")
+            missing.append(f"{package} (check failed: {str(e)})")
+    
+    return missing
 
-
-def _recenter_allowed(self):
-    scene = bpy.context.scene
-    conditional_requirement = self.proj_scene == 'TMERC' if PYPROJ else self.dxf_indi == "SPHERICAL"
-    return not (
-                    self.use_georeferencing and
-                    (
-                        conditional_requirement or
-                        (not self.create_new_scene and is_ref_scene(scene))
-                    )
-                    )
-
-
-def _set_recenter(self, value):
-    self.recenter = value if _recenter_allowed(self) else False
-
-
-def _update_proj_scene_do(self, context):
-    # make sure scene EPSG is not None if DXF EPSG is not None
-    if self.proj_scene == 'NONE' and self.proj_dxf != 'NONE':
-        self.proj_scene = self.proj_dxf
-
-
-def _update_import_atts_do(self, context):
-    mo = merge_map[self.merge_options]
-    if mo == BY_CLOSED_NO_BULGE_POLY or mo == BY_BLOCKS:
-        self.import_atts = False
-        self.represent_thickness_and_width = False
-    elif self.represent_thickness_and_width and self.merge:
-        self.import_atts = True
-    elif not self.merge:
-        self.import_atts = False
-
-
-class IMPORT_OT_dxf(bpy.types.Operator):
-    """Import from DXF file format (.dxf)"""
-    bl_idname = "import_scene.dxf"
-    bl_description = 'Import from DXF file format (.dxf)'
-    bl_label = "Import DXF"
-    bl_space_type = 'PROPERTIES'
-    bl_region_type = 'WINDOW'
-    bl_options = {'UNDO'}
-
-    filepath: StringProperty(
-            name="input file",
-            subtype='FILE_PATH'
-            )
-
-    filename_ext = ".dxf"
-
-    files: CollectionProperty(
-            type=bpy.types.OperatorFileListElement,
-            options={'HIDDEN', 'SKIP_SAVE'}
-            )
-
-    directory: StringProperty(
-            subtype='DIR_PATH'
-            )
-
-    filter_glob: StringProperty(
-            default="*.dxf",
-            options={'HIDDEN'},
-            )
-
-    def _update_merge(self, context):
-        _update_import_atts_do(self, context)
-    merge: BoolProperty(
-            name="Merged Objects",
-            description="Merge DXF entities to Blender objects",
-            default=T_Merge,
-            update=_update_merge
-            )
-
-    def _update_merge_options(self, context):
-        _update_import_atts_do(self, context)
-
-    merge_options: EnumProperty(
-            name="Merge",
-            description="Merge multiple DXF entities into one Blender object",
-            items=[('BY_LAYER', "By Layer", "Merge DXF entities of a layer to an object"),
-                   ('BY_TYPE', "By Layer AND DXF-Type", "Merge DXF entities by type AND layer"),
-                   ('BY_CLOSED_NO_BULGE_POLY', "By Layer AND closed no-bulge polys", "Polys can have a transformation attribute that makes DXF polys resemble Blender mesh faces quite a bit. Merging them results in one MESH object."),
-                   ('BY_BLOCKS', "By Layer AND DXF-Type AND Blocks", "Merging blocks results in all uniformly scaled blocks being referenced by a dupliface mesh instead of object containers. Non-uniformly scaled blocks will be imported as indicated by 'Blocks As'.")],
-            default='BY_LAYER',
-            update=_update_merge_options
-            )
-
-    merge_lines: BoolProperty(
-            name="Combine LINE entities to polygons",
-            description="Checks if lines are connect on start or end and merges them to a polygon",
-            default=T_MergeLines
-            )
-
-    import_text: BoolProperty(
-            name="Import Text",
-            description="Import DXF Text Entities MTEXT and TEXT",
-            default=T_ImportText,
-            )
-
-    import_light: BoolProperty(
-            name="Import Lights",
-            description="Import DXF Text Entity LIGHT",
-            default=T_ImportLight
-            )
-
-    export_acis: BoolProperty(
-            name="Export ACIS Entities",
-            description="Export Entities consisting of ACIS code to ACIS .sat/.sab files",
-            default=T_ExportAcis
-            )
-
-    outliner_groups: BoolProperty(
-            name="Display Groups in Outliner(s)",
-            description="Make all outliners in current screen layout show groups",
-            default=T_OutlinerGroups
-            )
-
-    do_bbox: BoolProperty(
-            name="Parent Blocks to Bounding Boxes",
-            description="Create a bounding box for blocks with more than one object (faster without)",
-            default=T_Bbox
-            )
-
-    scene_options: EnumProperty(
-            name="Scene",
-            description="Select the import method",
-            items=[('CURRENT_SCENE', "Current", "All DXF files in the current scene."),
-                   ('NEW_SCENE', "New", "Each DXF file in a new scene."),
-                   ('NEW_UNIQUE_SCENE', "Unique", "All DXF files in a new collection.")],
-            default='CURRENT_SCENE',
-            )
-
-    collection_options: EnumProperty(
-            name="Collection",
-            description="Select the import method",
-            items=[('CURRENT_COLLECTION', "Current", "All DXF files in the current scene collection."),
-                   ('NEW_COLLECTION', "New", "Each DXF file in a new collection."),
-                   ('SCENE_COLLECTION', "Scene", "All DXF files in the scene collection.")],
-            default='CURRENT_COLLECTION',
-            )
-
-    block_options: EnumProperty(
-            name="Blocks As",
-            description="Select the representation of DXF blocks: linked objects or group instances",
-            items=[('LINKED_OBJECTS', "Linked Objects", "Block objects get imported as linked objects"),
-                   ('GROUP_INSTANCES', "Group Instances", "Block objects get imported as group instances")],
-            default='LINKED_OBJECTS',
-
-            )
-
-    def _update_create_new_scene(self, context):
-        _update_use_georeferencing_do(self, context)
-        _set_recenter(self, self.recenter)
-    create_new_scene: BoolProperty(
-            name="Import DXF to new scene",
-            description="Creates a new scene with the name of the imported file",
-            default=T_CreateNewScene,
-            update=_update_create_new_scene,
-            )
-
-    recenter: BoolProperty(
-            name="Center geometry to scene",
-            description="Moves geometry to the center of the scene",
-            default=T_Recenter,
-            )
-
-    def _update_thickness_width(self, context):
-        _update_import_atts_do(self, context)
-    represent_thickness_and_width: BoolProperty(
-            name="Represent line thickness/width",
-            description="Map thickness and width of lines to Bevel objects and extrusion attribute",
-            default=T_ThicknessBevel,
-            update=_update_thickness_width
-            )
-
-    import_atts: BoolProperty(
-            name="Merge by attributes",
-            description="If 'Merge objects' is on but thickness and width are not chosen to be represented, with this "
-                        "option object still can be merged by thickness, with, subd and extrusion attributes "
-                        "(extrusion = transformation matrix of DXF objects)",
-            default=T_import_atts
-            )
-
-    # geo referencing
-
-    def _update_use_georeferencing(self, context):
-        _update_use_georeferencing_do(self, context)
-        _set_recenter(self, self.recenter)
-    use_georeferencing: BoolProperty(
-            name="Geo Referencing",
-            description="Project coordinates to a given coordinate system or reference point",
-            default=True,
-            update=_update_use_georeferencing,
-            )
-
-    def _update_dxf_indi(self, context):
-        _set_recenter(self, self.recenter)
-    dxf_indi: EnumProperty(
-            name="DXF coordinate type",
-            description="Indication for spherical or euclidean coordinates",
-            items=[('EUCLIDEAN', "Euclidean", "Coordinates in x/y"),
-                   ('SPHERICAL', "Spherical", "Coordinates in lat/lon")],
-            default='EUCLIDEAN',
-            update=_update_dxf_indi,
-            )
-
-    # Note: FloatProperty is not precise enough, e.g. 1.0 becomes 0.999999999. Python is more precise here (it uses
-    #       doubles internally), so we store it as string here and convert to number with py's float() func.
-    dxf_scale: StringProperty(
-            name="Unit Scale",
-            description="Coordinates are assumed to be in meters; deviation must be indicated here",
-            default="1.0"
-            )
-
-    def _update_proj(self, context):
-        _update_proj_scene_do(self, context)
-        _set_recenter(self, self.recenter)
-    if PYPROJ:
-        pitems = proj_none_items + proj_user_items + proj_epsg_items
-        proj_dxf: EnumProperty(
-            name="DXF SRID",
-            description="The coordinate system for the DXF file (check http://epsg.io)",
-            items=pitems,
-            default='NONE',
-            update=_update_proj,
-            )
-
-    epsg_dxf_user: StringProperty(name="EPSG-Code", default="EPSG")
-    merc_dxf_lat: FloatProperty(name="Geo-Reference Latitude", default=0.0)
-    merc_dxf_lon: FloatProperty(name="Geo-Reference Longitude", default=0.0)
-
-    pitems = proj_none_items + ((proj_user_items + proj_tmerc_items + proj_epsg_items) if PYPROJ else proj_tmerc_items)
-    proj_scene: EnumProperty(
-            name="Scn SRID",
-            description="The coordinate system for the Scene (check http://epsg.io)",
-            items=pitems,
-            default='NONE',
-            update=_update_proj,
-            )
-
-    epsg_scene_user: StringProperty(name="EPSG-Code", default="EPSG")
-    merc_scene_lat: FloatProperty(name="Geo-Reference Latitude", default=0.0)
-    merc_scene_lon: FloatProperty(name="Geo-Reference Longitude", default=0.0)
-
-    # internal use only!
-    internal_using_scene_srid: BoolProperty(default=False, options={'HIDDEN'})
-
+class DXFImportPreferences(AddonPreferences):
+    bl_idname = __package__
+    
     def draw(self, context):
         layout = self.layout
-        scene = context.scene
-
-        # Import options
-        layout.label(text="Import Options:")
-        box = layout.box()
-        box.prop(self, "scene_options")
-        box.prop(self, "collection_options")
-
-        # merge options
-        layout.label(text="Merge Options:")
-        box = layout.box()
-        sub = box.row()
-        #sub.enabled = merge_map[self.merge_options] != BY_BLOCKS
-        sub.prop(self, "block_options")
-        box.prop(self, "do_bbox")
-        box.prop(self, "merge")
-        sub = box.row()
-        sub.enabled = self.merge
-        sub.prop(self, "merge_options")
-        box.prop(self, "merge_lines")
-
-        # general options
-        layout.label(text="Line thickness and width:")
-        box = layout.box()
-        box.enabled = not merge_map[self.merge_options] == BY_CLOSED_NO_BULGE_POLY
-        box.prop(self, "represent_thickness_and_width")
-        sub = box.row()
-        sub.enabled = (not self.represent_thickness_and_width and self.merge)
-        sub.prop(self, "import_atts")
-
-        # optional objects
-        layout.label(text="Optional Objects:")
-        box = layout.box()
-        box.prop(self, "import_text")
-        box.prop(self, "import_light")
-        box.prop(self, "export_acis")
-
-        # view options
-        layout.label(text="View Options:")
-        box = layout.box()
-        box.prop(self, "outliner_groups")
-        sub = box.row()
-        sub.enabled = _recenter_allowed(self)
-        sub.prop(self, "recenter")
-
-        # geo referencing
-        layout.prop(self, "use_georeferencing", text="Geo Referencing:")
-        box = layout.box()
-        box.enabled = self.use_georeferencing
-        self.draw_pyproj(box, context.scene) if PYPROJ else self.draw_merc(box)
-
-    def draw_merc(self, box):
-        box.label(text="DXF File:")
-        box.prop(self, "dxf_indi")
-        box.prop(self, "dxf_scale")
-
-        sub = box.column()
-        sub.enabled = not _recenter_allowed(self)
-        sub.label(text="Geo Reference:")
-        sub = box.column()
-        sub.enabled = not _recenter_allowed(self)
-        if is_ref_scene(bpy.context.scene):
-            sub.enabled = False
-        sub.prop(self, "merc_scene_lat", text="Lat")
-        sub.prop(self, "merc_scene_lon", text="Lon")
-
-    def draw_pyproj(self, box, scene):
-        valid_dxf_srid = True
-
-        # DXF SCALE
-        box.prop(self, "dxf_scale")
-
-        # EPSG DXF
-        box.alert = (self.proj_scene != 'NONE' and (not valid_dxf_srid or self.proj_dxf == 'NONE'))
-        box.prop(self, "proj_dxf")
-        box.alert = False
-        if self.proj_dxf == 'USER':
-            try:
-                Proj(init=self.epsg_dxf_user)
-            except:
-                box.alert = True
-                valid_dxf_srid = False
-            box.prop(self, "epsg_dxf_user")
-        box.alert = False
-
-        box.separator()
-
-        # EPSG SCENE
-        col = box.column()
-        # Only info in case of pre-defined EPSG from current scene.
-        if self.internal_using_scene_srid:
-            col.enabled = False
-
-        col.prop(self, "proj_scene")
-
-        if self.proj_scene == 'USER':
-            try:
-                Proj(init=self.epsg_scene_user)
-            except Exception as e:
-                col.alert = True
-            col.prop(self, "epsg_scene_user")
-            col.alert = False
-            col.label(text="")  # Placeholder.
-        elif self.proj_scene == 'TMERC':
-            col.prop(self, "merc_scene_lat", text="Lat")
-            col.prop(self, "merc_scene_lon", text="Lon")
+        missing = check_dependencies()
+        
+        if missing:
+            box = layout.box()
+            box.label(text="Missing Dependencies", icon='ERROR')
+            for pkg in missing:
+                box.label(text=f"- {pkg}")
+            
+            box.operator("wm.install_dxf_dependencies", 
+                        text="Install Dependencies", 
+                        icon='CONSOLE')
         else:
-            col.label(text="")  # Placeholder.
-            col.label(text="")  # Placeholder.
+            box = layout.box()
+            box.label(text="All dependencies are installed", icon='CHECKMARK')
 
-        # user info
-        if self.proj_scene != 'NONE':
-            if not valid_dxf_srid:
-                box.label(text="DXF SRID not valid", icon="ERROR")
-            if self.proj_dxf == 'NONE':
-                box.label(text="", icon='ERROR')
-                box.label(text="DXF SRID must be set, otherwise")
-                if self.proj_scene == 'USER':
-                    code = self.epsg_scene_user
-                else:
-                    code = self.proj_scene
-                box.label(text='Scene SRID %r is ignored!' % code)
-
+class INSTALL_OT_DXFDependencies(Operator):
+    """Install missing dependencies"""
+    bl_idname = "wm.install_dxf_dependencies"
+    bl_label = "Install Dependencies"
+    bl_options = {'REGISTER', 'INTERNAL'}
+    
     def execute(self, context):
-        block_map = {"LINKED_OBJECTS": LINKED_OBJECTS, "GROUP_INSTANCES": GROUP_INSTANCES}
-        merge_options = SEPARATED
-        if self.merge:
-            merge_options = merge_map[self.merge_options]
-        scene = bpy.context.scene
-        if self.create_new_scene:
-            scene = bpy.data.scenes.new(os.path.basename(self.filepath).replace(".dxf", ""))
-
-        proj_dxf = None
-        proj_scn = None
-        dxf_unit_scale = 1.0
-        if self.use_georeferencing:
-            dxf_unit_scale = float(self.dxf_scale.replace(",", "."))
-            if PYPROJ:
-                if self.proj_dxf != 'NONE':
-                    if self.proj_dxf == 'USER':
-                        proj_dxf = Proj(init=self.epsg_dxf_user)
-                    else:
-                        proj_dxf = Proj(init=self.proj_dxf)
-                if self.proj_scene != 'NONE':
-                    if self.proj_scene == 'USER':
-                        proj_scn = Proj(init=self.epsg_scene_user)
-                    elif self.proj_scene == 'TMERC':
-                        proj_scn = TransverseMercator(lat=self.merc_scene_lat, lon=self.merc_scene_lon)
-                    else:
-                        proj_scn = Proj(init=self.proj_scene)
-            else:
-                proj_dxf = Indicator(self.dxf_indi)
-                proj_scn = TransverseMercator(lat=self.merc_scene_lat, lon=self.merc_scene_lon)
-
-        scene = bpy.context.scene
-        if self.create_new_scene:
-            scene = bpy.data.scenes.new(Path(file.name).stem)
-
-        for file in self.files:
-
-            match self.scene_options:
-                case 'NEW_SCENE':
-                    scene = bpy.data.scenes.new(Path(file.name).stem)
-                case 'NEW_UNIQUE_SCENE':
-                    scene_name="DXF Import"
-                    if bpy.data.scenes.get(scene_name): scene=bpy.data.scenes[scene_name]
-                    else: scene = bpy.data.scenes.new(scene_name)
-                case _:
-                    scene = bpy.context.scene
-
-            match self.collection_options:
-                case 'NEW_COLLECTION':
-                    collection = bpy.data.collections.new(Path(file.name).stem)
-                    scene.collection.children.link(collection)
-                case 'SCENE_COLLECTION':
-                    collection = scene.collection
-                case _:
-                    collection = bpy.context.collection
-                    if collection != scene.collection and collection.name not in scene.collection.children: scene.collection.children.link(collection)
-
-            if RELEASE_TEST:
-                # for release testing
-                from . import test
-                test.test()
-            else:
-                read(self.report, Path(self.directory, file.name), merge_options, self.import_text, self.import_light, self.export_acis,
-                 self.merge_lines, self.do_bbox, block_map[self.block_options], scene, collection, self.recenter,
-                 proj_dxf, proj_scn, self.represent_thickness_and_width, self.import_atts, dxf_unit_scale)
-
-        if self.outliner_groups:
-            display_groups_in_outliner()
-
+        python_exe = Path(sys.executable)
+        self.report({'INFO'}, f"Installing dependencies using: {python_exe}")
+        
+        for package in REQUIRED_PACKAGES:
+            try:
+                # Install directly to Blender's Python
+                # Get Blender's user scripts directory
+                import bpy
+                target_dir = bpy.utils.user_resource('SCRIPTS', "addons")
+                
+                # Create a lib directory in the addon folder
+                lib_dir = os.path.join(os.path.dirname(target_dir), 'lib')
+                os.makedirs(lib_dir, exist_ok=True)
+                
+                # Add the lib directory to Python path if not already there
+                if lib_dir not in sys.path:
+                    sys.path.append(lib_dir)
+                
+                # Install with --target to the user's addon lib directory
+                cmd = [
+                    str(python_exe),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-warn-script-location",
+                    "--target", lib_dir,
+                    "--upgrade",
+                    "--no-cache-dir",
+                    "--user",
+                    package
+                ]
+                print(f"Running: {' '.join(cmd)}")
+                subprocess.check_call(cmd)
+                self.report({'INFO'}, f"Successfully installed {package}")
+                
+            except subprocess.CalledProcessError as e:
+                self.report({'ERROR'}, f"Failed to install {package}. Error: {e}")
+                # Continue with next package instead of failing completely
+                continue
+            except Exception as e:
+                self.report({'ERROR'}, f"Unexpected error installing {package}: {e}")
+                continue
+        
+        # Check if all dependencies are now installed
+        missing = check_dependencies()
+        if missing:
+            self.report({'WARNING'}, f"Some dependencies failed to install: {', '.join(missing)}")
+            return {'CANCELLED'}
+        
+        # Only reload if all dependencies are installed
+        try:
+            bpy.ops.preferences.addon_disable(module=__package__)
+            bpy.ops.preferences.addon_enable(module=__package__)
+        except Exception as e:
+            self.report({'ERROR'}, f"Error reloading add-on: {e}")
+            return {'CANCELLED'}
+        
+        self.report({'INFO'}, "All dependencies installed successfully!")
         return {'FINISHED'}
 
-    def invoke(self, context, event):
-        # Force first update...
-        self._update_use_georeferencing(context)
-
-        wm = context.window_manager
-        wm.fileselect_add(self)
-        return {'RUNNING_MODAL'}
 
 
-def menu_func(self, context):
+class DXFImportSettings(PropertyGroup):
+    """Container for DXF import settings."""
+    
+    # File settings
+    filepath: StringProperty(
+        name="File Path",
+        description="Path to the DXF file",
+        maxlen=1024,
+        subtype='FILE_PATH',
+    )
+    
+    # Import options
+    import_blocks: BoolProperty(
+        name="Import Blocks",
+        description="Import block definitions and references",
+        default=True,
+    )
+    
+    import_text: BoolProperty(
+        name="Import Text",
+        description="Import text entities",
+        default=True,
+    )
+    
+    import_invisible: BoolProperty(
+        name="Import Invisible",
+        description="Import entities on hidden or frozen layers",
+        default=False,
+    )
+    
+    # Geometry options
+    scale: FloatProperty(
+        name="Scale",
+        description="Scale factor for imported geometry",
+        default=1.0,
+        min=0.0001,
+        max=1000.0,
+    )
+    
+    curve_segments: bpy.props.IntProperty(
+        name="Curve Segments",
+        description="Number of segments for curves and circles",
+        default=12,
+        min=3,
+        max=128,
+    )
+    
+    # Layer options
+    create_layers: BoolProperty(
+        name="Create Layers",
+        description="Create Blender collections for DXF layers",
+        default=True,
+    )
+    
+    # Coordinate system
+    y_up: BoolProperty(
+        name="Y Up",
+        description="Convert from Y-up to Z-up coordinate system",
+        default=True,
+    )
+    
+    # Advanced options
+    verbose: BoolProperty(
+        name="Verbose",
+        description="Print debug information to the console",
+        default=False,
+    )
+
+
+class IMPORT_OT_dxf(Operator, ImportHelper):
+    """Import a DXF file as a collection of Blender objects"""
+    
+    bl_idname = "import_scene.dxf"
+    bl_label = "Import DXF"
+    bl_options = {'PRESET', 'UNDO'}
+    
+    # File dialog filter
+    filename_ext = ".dxf"
+    filter_glob: StringProperty(
+        default="*.dxf",
+        options={'HIDDEN'},
+        maxlen=255,
+    )
+    
+    # Import settings
+    settings: PointerProperty(
+        type=DXFImportSettings,
+        name="DXF Import Settings",
+        description="Import settings",
+    )
+    
+    def draw(self, context):
+        """Draw the import dialog."""
+        layout = self.layout
+        settings = self.settings
+        
+        # Main options
+        box = layout.box()
+        box.label(text="Import Options", icon='IMPORT')
+        box.prop(settings, "import_blocks")
+        box.prop(settings, "import_text")
+        box.prop(settings, "import_invisible")
+        
+        # Geometry options
+        box = layout.box()
+        box.label(text="Geometry", icon='MESH_DATA')
+        box.prop(settings, "scale")
+        box.prop(settings, "curve_segments")
+        
+        # Layer options
+        box = layout.box()
+        box.label(text="Layers", icon='OUTLINER_COLLECTION')
+        box.prop(settings, "create_layers")
+        
+        # Coordinate system
+        box = layout.box()
+        box.label(text="Coordinate System", icon='WORLD')
+        box.prop(settings, "y_up")
+        
+        # Advanced options
+        box = layout.box()
+        box.prop(settings, "verbose")
+    
+    def execute(self, context):
+        """Execute the import operation."""
+        # Get import settings
+        settings = self.settings
+        filepath = self.filepath
+        
+        # Check if file exists
+        if not os.path.isfile(filepath):
+            self.report({'ERROR'}, f"File not found: {filepath}")
+            return {'CANCELLED'}
+        
+        # Create a new collection for the import
+        import_name = os.path.splitext(os.path.basename(filepath))[0]
+        collection = bpy.data.collections.new(import_name)
+        context.scene.collection.children.link(collection)
+        
+        # Set up import options
+        options = {
+            'import_blocks': settings.import_blocks,
+            'import_text': settings.import_text,
+            'import_invisible': settings.import_invisible,
+            'scale': settings.scale,
+            'curve_segments': settings.curve_segments,
+            'create_layers': settings.create_layers,
+            'y_up': settings.y_up,
+            'verbose': settings.verbose,
+        }
+        
+        # Import the DXF file
+        try:
+            # Print debug info
+            print(f"\n=== Starting DXF Import ===")
+            print(f"File: {filepath}")
+            print(f"Options: {options}")
+            
+            # Initialize importer
+            try:
+                importer = DXFImporter(filepath, options)
+                print("DXFImporter initialized successfully")
+            except Exception as e:
+                print(f"\n!!! Error creating DXFImporter: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                self.report({'ERROR'}, f"初始化DXF导入器失败: {str(e)}")
+                return {'CANCELLED'}
+            
+            # Read DXF file
+            try:
+                print("Reading DXF file...")
+                success = importer.read()
+                print(f"DXF read result: {success}")
+            except Exception as e:
+                print(f"\n!!! Error reading DXF file: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                self.report({'ERROR'}, f"读取DXF文件失败: {str(e)}")
+                return {'CANCELLED'}
+            
+            # Import to scene
+            if success:
+                try:
+                    print("Importing to Blender scene...")
+                    importer.import_to_scene(context.scene, collection)
+                    print("Import completed successfully")
+                    self.report({'INFO'}, f"成功导入 {filepath}")
+                    return {'FINISHED'}
+                except Exception as e:
+                    print(f"\n!!! Error importing to scene: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    self.report({'ERROR'}, f"导入到场景时出错: {str(e)}")
+                    return {'CANCELLED'}
+            else:
+                self.report({'ERROR'}, f"无法导入DXF文件: 文件可能已损坏或不支持此格式")
+                return {'CANCELLED'}
+                
+        except Exception as e:
+            error_msg = f"导入DXF时发生错误: {str(e)}"
+            print(f"\n!!! Unexpected error: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            self.report({'ERROR'}, error_msg)
+            return {'CANCELLED'}
+        finally:
+            print("=== DXF Import Finished ===\n")
+
+
+def menu_func_import(self, context):
+    """Add the import option to the File > Import menu."""
     self.layout.operator(IMPORT_OT_dxf.bl_idname, text="AutoCAD DXF (.dxf)")
 
 
+classes = (
+    DXFImportSettings,
+    DXFImportPreferences,
+    INSTALL_OT_DXFDependencies,
+    IMPORT_OT_dxf,
+)
+
 def register():
-    bpy.utils.register_class(IMPORT_OT_dxf)
-    bpy.types.TOPBAR_MT_file_import.append(menu_func)
+    """Register the add-on."""
+    from bpy.utils import register_class
+    
+    # Register all classes
+    for cls in classes:
+        try:
+            register_class(cls)
+        except Exception as e:
+            print(f"Error registering class {cls.__name__}: {e}")
+    
+    # Add to import menu
+    bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+    
+    # Register properties
+    if not hasattr(bpy.types.Scene, 'dxf_import_settings'):
+        bpy.types.Scene.dxf_import_settings = PointerProperty(type=DXFImportSettings)
+    
+    # Check dependencies
+    missing = check_dependencies()
+    if missing:
+        print(f"Missing dependencies: {', '.join(missing)}")
+        print("Please install them from the add-on preferences.")
+    else:
+        print("All dependencies are installed.")
 
 
 def unregister():
-    bpy.utils.unregister_class(IMPORT_OT_dxf)
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func)
+    """Unregister the add-on."""
+    from bpy.utils import unregister_class
+    
+    # Remove from import menu - use a more reliable method
+    try:
+        bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    except (AttributeError, ValueError):
+        # If the menu function is not in the list or menu doesn't exist, just pass
+        pass
+    
+    # Unregister all classes in reverse order
+    for cls in reversed(classes):
+        try:
+            unregister_class(cls)
+        except (RuntimeError, ValueError):
+            # Class not registered or already unregistered
+            pass
+    
+    # Unregister properties
+    if hasattr(bpy.types.Scene, 'dxf_import_settings'):
+        try:
+            del bpy.types.Scene.dxf_import_settings
+        except:
+            pass
 
 
 if __name__ == "__main__":

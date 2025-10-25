@@ -31,7 +31,20 @@
 ## 系统要求
 
 - Blender 4.2 或更高版本
-- Python 3.x
+- Python 3.8 或更高版本
+
+## 依赖
+
+插件需要以下 Python 包：
+
+- `ezdxf>=1.3.0` - 用于 DXF 文件解析
+- `pyproj>=3.0.0` - 用于坐标参考系统支持
+
+这些依赖会在插件安装时自动安装。如果需要手动安装，可以运行：
+
+```bash
+pip install -r requirements.txt
+```
 
 ## 贡献指南
 
