@@ -70,6 +70,7 @@ T_Recenter = False
 T_ThicknessBevel = True
 T_import_atts = True
 T_Collection = False
+T_CurveToLoose = False
 
 RELEASE_TEST = False
 DEBUG = False
@@ -81,11 +82,11 @@ def is_ref_scene(scene):
 
 def read(report, filename, obj_merge=BY_LAYER, import_text=True, import_light=True, export_acis=True, merge_lines=True,
          do_bbox=True, block_rep=LINKED_OBJECTS, new_scene=None, new_collection=None, recenter=False, projDXF=None, projSCN=None,
-         thicknessWidth=True, but_group_by_att=True, dxf_unit_scale=1.0):
+         thicknessWidth=True, but_group_by_att=True, dxf_unit_scale=1.0, convert_curves_to_loose=False):
     # import dxf and export nurbs types to sat/sab files
     # because that's how autocad stores nurbs types in a dxf...
     do = Do(filename, obj_merge, import_text, import_light, export_acis, merge_lines, do_bbox, block_rep, recenter,
-            projDXF, projSCN, thicknessWidth, but_group_by_att, dxf_unit_scale)
+            projDXF, projSCN, thicknessWidth, but_group_by_att, dxf_unit_scale, convert_curves_to_loose)
 
     errors = do.entities(Path(filename.name).stem, new_scene, new_collection)
 
@@ -220,6 +221,12 @@ class IMPORT_OT_dxf(bpy.types.Operator):
             name="Combine LINE entities to polygons",
             description="Checks if lines are connect on start or end and merges them to a polygon",
             default=T_MergeLines
+            )
+
+    convert_curves_to_loose: BoolProperty(
+            name="Convert Curves to Loose Edges",
+            description="Convert curve entities to loose edges while preserving names and hierarchy",
+            default=T_CurveToLoose,
             )
 
     import_text: BoolProperty(
@@ -398,6 +405,7 @@ class IMPORT_OT_dxf(bpy.types.Operator):
         sub.enabled = self.merge
         sub.prop(self, "merge_options")
         box.prop(self, "merge_lines")
+        box.prop(self, "convert_curves_to_loose")
 
         # general options
         layout.label(text="Line thickness and width:")
@@ -565,7 +573,7 @@ class IMPORT_OT_dxf(bpy.types.Operator):
             else:
                 read(self.report, Path(self.directory, file.name), merge_options, self.import_text, self.import_light, self.export_acis,
                  self.merge_lines, self.do_bbox, block_map[self.block_options], scene, collection, self.recenter,
-                 proj_dxf, proj_scn, self.represent_thickness_and_width, self.import_atts, dxf_unit_scale)
+                 proj_dxf, proj_scn, self.represent_thickness_and_width, self.import_atts, dxf_unit_scale, self.convert_curves_to_loose)
 
         if self.outliner_groups:
             display_groups_in_outliner()

@@ -79,12 +79,12 @@ class Do:
         "dwg", "combination", "known_blocks", "import_text", "import_light", "export_acis", "merge_lines",
         "do_bounding_boxes", "acis_files", "errors", "block_representation", "recenter", "did_group_instance",
         "objects_before", "pDXF", "pScene", "thickness_and_width", "but_group_by_att", "current_scene", "current_collection",
-        "dxf_unit_scale"
+        "dxf_unit_scale", "convert_curves_to_loose"
     )
 
     def __init__(self, dxf_filename, c=BY_LAYER, import_text=True, import_light=True, export_acis=True,
                  merge_lines=True, do_bbox=True, block_rep=LINKED_OBJECTS, recenter=False, pDXF=None, pScene=None,
-                 thicknessWidth=True, but_group_by_att=True, dxf_unit_scale=1.0):
+                 thicknessWidth=True, but_group_by_att=True, dxf_unit_scale=1.0, convert_curves_to_loose=False):
         self.dwg = dxfgrabber.readfile(dxf_filename, {"assure_3d_coords": True})
         self.combination = c
         self.known_blocks = {}
@@ -106,6 +106,7 @@ class Do:
         self.current_scene = None
         self.current_collection = None
         self.dxf_unit_scale = dxf_unit_scale
+        self.convert_curves_to_loose = convert_curves_to_loose
 
     def proj(self, co, elevation=0):
         """
@@ -1261,6 +1262,9 @@ class Do:
         name: name of the returned Blender object (String)
         Accumulates all entities in the list into a Blender curve and returns a Blender object containing it.
         """
+        if self.convert_curves_to_loose:
+            return self._create_loose_edges(entities, scene, name)
+        
         d = bpy.data.curves.new(name, "CURVE")
 
         i = 0
@@ -1289,6 +1293,64 @@ class Do:
 
         return None
 
+
+    def _create_loose_edges(self, entities, scene, name):
+        """
+        Convert curve entities to a mesh with loose edges while preserving names and hierarchy.
+        """
+        import bmesh
+        import mathutils
+        
+        bm = bmesh.new()
+        
+        for en in entities:
+            if hasattr(en, 'points'):
+                # Handle entities with points (like LWPOLYLINE, POLYLINE, etc.)
+                points = [self.proj(Vector(p)) for p in en.points]
+                if len(points) > 1:
+                    verts = [bm.verts.new(p) for p in points]
+                    for i in range(len(verts) - 1):
+                        bm.edges.new((verts[i], verts[i + 1]))
+            elif hasattr(en, 'start') and hasattr(en, 'end'):
+                # Handle simple line entities
+                v1 = bm.verts.new(self.proj(Vector(en.start)))
+                v2 = bm.verts.new(self.proj(Vector(en.end)))
+                bm.edges.new((v1, v2))
+            elif hasattr(en, 'center') and hasattr(en, 'radius'):
+                # Handle circles and arcs
+                if hasattr(en, 'start_angle') and hasattr(en, 'end_angle'):
+                    # It's an arc
+                    points = self.arc(en, None)
+                    if points:
+                        verts = [bm.verts.new(self.proj(p)) for p in points]
+                        for i in range(len(verts) - 1):
+                            bm.edges.new((verts[i], verts[i + 1]))
+                else:
+                    # It's a circle
+                    points = []
+                    for i in range(32):  # 32 segments for the circle
+                        angle = (2 * math.pi * i) / 32
+                        x = en.center[0] + en.radius * math.cos(angle)
+                        y = en.center[1] + en.radius * math.sin(angle)
+                        points.append((x, y, en.center[2] if len(en.center) > 2 else 0))
+                    verts = [bm.verts.new(self.proj(Vector(p))) for p in points]
+                    for i in range(len(verts)):
+                        bm.edges.new((verts[i], verts[(i + 1) % len(verts)]))
+        
+        # Create mesh and object
+        mesh = bpy.data.meshes.new(name)
+        bm.to_mesh(mesh)
+        bm.free()
+        
+        obj = bpy.data.objects.new(name, mesh)
+        
+        # Set object location to (0,0,0) since we've already transformed the points
+        obj.location = (0, 0, 0)
+        
+        # Link to current collection
+        self.current_collection.objects.link(obj)
+        
+        return obj
     def object_surface(self, entities, scene, name):
         """
         entities: list of DXF entities
