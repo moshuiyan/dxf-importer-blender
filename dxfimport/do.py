@@ -6,7 +6,7 @@ import bpy
 import os
 import re
 from mathutils import Vector, Matrix, Euler, Color, geometry
-from math import pi, radians, sqrt
+from math import pi, radians, sqrt, cos, sin
 
 import bmesh
 from .. import dxfgrabber
@@ -709,7 +709,6 @@ class Do:
         o = bpy.data.objects.new("Point", None)
         o.location = self.proj(en.point)
         self._extrusion(o, en)
-        self.current_collection.objects.link(o)
 
         group = self._get_group(en.layer)
         group.objects.link(o)
@@ -737,7 +736,7 @@ class Do:
             o.location = self.proj(en.position)
             dir = self.proj(en.target) - self.proj(en.position)
             o.rotation_quaternion = dir.rotation_difference(Vector((0, 0, -1)))
-            self.current_collection.objects.link(o)
+            # self.current_collection.objects.link(o)
             return o
 
     def mtext(self, en, scene, name):
@@ -820,7 +819,7 @@ class Do:
                 if inserts is not None:
                     inserts.append(new_insert)
                 new_insert.parent = parent
-                self.current_collection.objects.link(new_insert)
+                # self.current_collection.objects.link(new_insert)
 
         if name is None:
             name = entity.name
@@ -852,7 +851,7 @@ class Do:
                 if len(insert.children) > 0:
                     i_copy = bpy.data.objects.new(insert.name, None)
                     i_copy.matrix_basis = insert.matrix_basis
-                    self.current_collection.objects.link(i_copy)
+                    # self.current_collection.objects.link(i_copy)
                     group.objects.link(i_copy)
                     kids = insert.children[:]
                     for child in kids:
@@ -866,10 +865,10 @@ class Do:
             if len(objects) > 1 or len(insert_bounding_boxes) > 0:
                 if self.do_bounding_boxes:
                     o = self._object_bbox(objects + insert_bounding_boxes, name, recursion_level == 0)
-                    self.current_collection.objects.link(o)
+                    # self.current_collection.objects.link(o)
                 else:
                     o = bpy.data.objects.new(name, None)
-                    self.current_collection.objects.link(o)
+                    # self.current_collection.objects.link(o)
                 if len(objects) > 0:
                     for obj in objects:
                         obj.parent = o
@@ -879,13 +878,12 @@ class Do:
             else:
                 # strange case but possible according to the testfiles
                 o = bpy.data.objects.new(name, None)
-                self.current_collection.objects.link(o)
+                # self.current_collection.objects.link(o)
 
             # unlink bounding boxes of inserts
             for ib in insert_bounding_boxes:
                 if ib.name in group.objects:
-                    group.objects.unlink(ib)
-                self.current_collection.objects.unlink(ib)
+                    group.objects.unlink(ib)                
 
             # parent inserts to this block before any transformation on the block is being applied
             for obj in inserts:
@@ -904,11 +902,11 @@ class Do:
 
             for known_object in known_objects:
                 oc = known_object.copy()
-                self.current_collection.objects.link(oc)
+                # self.current_collection.objects.link(oc)
                 objects.append(oc)
 
             o = known_o.copy()
-            self.current_collection.objects.link(o)
+            # self.current_collection.objects.link(o)
 
             _recursive_copy_inserts(o, known_inserts, inserts, group, invisible)
 
@@ -998,7 +996,7 @@ class Do:
         if invisible is not None:
             o.hide_viewport = invisible
         o.location = self.proj(entity.basepoint)
-        self.current_collection.objects.link(o)
+        # self.current_collection.objects.link(o)
         # block_scene.view_layers[0].update()
 
         return o
@@ -1076,7 +1074,8 @@ class Do:
                     # Blender custom property
                     o[a.tag] = a.text
                     attname = entity.name + "_" + a.tag
-                    self.current_collection.objects.link(self.text(a, scene, attname))
+                    # 这行代码看不懂，后面要注意一下
+                    # self.current_collection.objects.link(self.text(a, scene, attname))
 
         return o
 
@@ -1159,7 +1158,7 @@ class Do:
 
             bevel = bpy.data.objects.new("BEVEL", bevd)
             obj.data.bevel_object = bevel
-            self.current_collection.objects.link(bevel)
+            # self.current_collection.objects.link(bevel)
 
             # CURVE TAPER
             if has_varying_width and len(ew) == 1:
@@ -1181,7 +1180,7 @@ class Do:
 
                 taper = bpy.data.objects.new("TAPER", tapd)
                 obj.data.taper_object = taper
-                self.current_collection.objects.link(taper)
+                # self.current_collection.objects.link(taper)
 
             # THICKNESS FOR CURVES HAVING A WIDTH
             if th != 0:
@@ -1219,7 +1218,7 @@ class Do:
 
         bm.to_mesh(d)
         o = bpy.data.objects.new(name, d)
-        self.current_collection.objects.link(o)
+        # self.current_collection.objects.link(o)
         return o
 
     def object_mesh(self, entities, scene, name):
@@ -1329,9 +1328,9 @@ class Do:
                     # It's a circle
                     points = []
                     for i in range(32):  # 32 segments for the circle
-                        angle = (2 * math.pi * i) / 32
-                        x = en.center[0] + en.radius * math.cos(angle)
-                        y = en.center[1] + en.radius * math.sin(angle)
+                        angle = (2 * pi * i) / 32
+                        x = en.center[0] + en.radius * cos(angle)
+                        y = en.center[1] + en.radius * sin(angle)
                         points.append((x, y, en.center[2] if len(en.center) > 2 else 0))
                     verts = [bm.verts.new(self.proj(Vector(p))) for p in points]
                     for i in range(len(verts)):
@@ -1347,8 +1346,7 @@ class Do:
         # Set object location to (0,0,0) since we've already transformed the points
         obj.location = (0, 0, 0)
         
-        # Link to current collection
-        self.current_collection.objects.link(obj)
+
         
         return obj
     def object_surface(self, entities, scene, name):
@@ -1436,7 +1434,7 @@ class Do:
             group = bpy.data.collections.new(name)
             # 在新建图层组的同时创建材质
             mat = self._get_or_create_material(name)
-            # group.objects.link(mat)
+            # 把集合加入场景
             if group.name not in self.current_collection.children:  
                 self.current_collection.children.link(group)
         return group
@@ -1481,8 +1479,8 @@ class Do:
                 raise
 
         if type(o) == bpy.types.Object:
-            if o.name not in scene.objects:
-                self.current_collection.objects.link(o)
+            # if o.name not in scene.objects:
+            #     self.current_collection.objects.link(o)
 
             if o.name not in group.objects:
                 group.objects.link(o)
@@ -1555,7 +1553,7 @@ class Do:
         bm.to_mesh(m)
         o = bpy.data.objects.new(blockname, m)
         o.location = location
-        self.current_collection.objects.link(o)
+        # self.current_collection.objects.link(o)
 
         self._nest_block(o, blockname, blgroup, scene)
         o.instance_type = "FACES"
@@ -1741,7 +1739,8 @@ class Do:
             group = self._get_group(layer.name)
             if group:
                 for obj in group.objects:
-                    obj.data.materials.append(self._get_or_create_material(layer.name))
+                    if obj.type == 'MESH' or obj.type == 'CURVE' or obj.type == 'FONT':
+                        obj.data.materials.append(self._get_or_create_material(layer.name))
         return self.errors
         # trying to import dimensions:
         # self.separated_objects((block for block in self.dwg.blocks if block.name.startswith("*")))
