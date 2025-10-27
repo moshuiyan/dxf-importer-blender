@@ -827,7 +827,7 @@ class Do:
         if override_group is not None:
             group = override_group
         else:
-            group = self._get_group(entity.layer.name)
+            group = self._get_group(entity.layer)
 
         # get object(s)
         objects = []
@@ -941,7 +941,7 @@ class Do:
         if override_group is not None:
             group = override_group
         else:
-            group = self._get_group(entity.layer.name)
+            group = self._get_group(entity.layer)
 
         block_group = self._get_group(entity.name+"_BLOCK")
 
@@ -1022,7 +1022,7 @@ class Do:
                               (kids > 0 or objtypes > 1 or sep > 1 or (objtypes > 0 and sep > 0))
 
         if group is None:
-            group = self._get_group(entity.layer.name)
+            group = self._get_group(entity.layer)
 
         if self.block_representation == GROUP_INSTANCES or need_group_inst:
             o = self.block_group_instances(self.dwg.blocks[entity.name], scene, entity.name, group,
@@ -1361,6 +1361,8 @@ class Do:
           
         return mat
     def _get_group(self, name):
+        if not isinstance(name, str):
+            raise ValueError("_get_group: name is not a string")
         """
         name: name of group (String)
         Finds group by name or creates it if it does not exist.
@@ -1673,11 +1675,11 @@ class Do:
 
         #bpy.context.window.scene = scene
         # 在导入完成后，将所有图层组的材质链接到当前场景
-        for layer_name in self.dwg.layers:
-            group = self._get_group(layer_name)
+        for layer in self.dwg.layers:
+            group = self._get_group(layer.name)
             if group:
                 for obj in group.objects:
-                    obj.data.materials.append(self._get_or_create_material(layer_name))
+                    obj.data.materials.append(self._get_or_create_material(layer.name))
         return self.errors
         # trying to import dimensions:
         # self.separated_objects((block for block in self.dwg.blocks if block.name.startswith("*")))
