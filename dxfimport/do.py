@@ -827,7 +827,7 @@ class Do:
         if override_group is not None:
             group = override_group
         else:
-            group = self._get_group(entity.layer)
+            group = self._get_group(entity.layer.name)
 
         # get object(s)
         objects = []
@@ -941,7 +941,7 @@ class Do:
         if override_group is not None:
             group = override_group
         else:
-            group = self._get_group(entity.layer)
+            group = self._get_group(entity.layer.name)
 
         block_group = self._get_group(entity.name+"_BLOCK")
 
@@ -1022,7 +1022,7 @@ class Do:
                               (kids > 0 or objtypes > 1 or sep > 1 or (objtypes > 0 and sep > 0))
 
         if group is None:
-            group = self._get_group(entity.layer)
+            group = self._get_group(entity.layer.name)
 
         if self.block_representation == GROUP_INSTANCES or need_group_inst:
             o = self.block_group_instances(self.dwg.blocks[entity.name], scene, entity.name, group,
@@ -1321,7 +1321,45 @@ class Do:
         return None
 
     """ ITERATE OVER DXF ENTITIES AND CREATE BLENDER OBJECTS """
+    def _get_or_create_material(self, layer_name):  
+        """根据图层名称获取或创建材质"""  
+        layer = self.dwg.layers[layer_name]  
+        mat_name = f"Material_{layer_name}"  
+          
+        if mat_name in bpy.data.materials:  
+            return bpy.data.materials[mat_name]  
+          
+        mat = bpy.data.materials.new(mat_name)  
+        mat.use_nodes = True  
+        # 打印材质节点树信息用于调试
+        print(f"Material nodes for {mat_name}:")  
+        for node in mat.node_tree.nodes:
+            print(f"- Node: {node.name} (Type: {type(node).__name__})")
 
+        # 确保有Principled BSDF节点
+        nodes = mat.node_tree.nodes
+        # 查找原理化BSDF节点（通过类型而不是名称）
+        bsdf = next((node for node in nodes if node.type == 'BSDF_PRINCIPLED'), None)
+        if bsdf is None:
+            print("Principled BSDF not found, creating one...")
+            # 清除所有现有节点
+            nodes.clear()
+            # 创建必要的节点
+            output = nodes.new('ShaderNodeOutputMaterial')
+            bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+            # 连接节点
+            mat.node_tree.links.new(bsdf.outputs[0], output.inputs[0])
+        else:
+            print("Principled BSDF found, using it...")
+            
+        # 设置颜色  
+        aci = layer.color  
+        color = dxfgrabber.aci_to_true_color(aci)  
+        if len(bsdf.inputs) > 0:  # 确保至少有一个输入
+            bsdf.inputs[0].default_value = (*color.rgb(), 1.0)
+        # bsdf.inputs["Base Color"].default_value = (*color.rgb(), 1.0)  
+          
+        return mat
     def _get_group(self, name):
         """
         name: name of group (String)
@@ -1332,6 +1370,11 @@ class Do:
             group = groups[name]
         else:
             group = bpy.data.collections.new(name)
+            # 在新建图层组的同时创建材质
+            mat = self._get_or_create_material(name)
+            # group.objects.link(mat)
+            if group.name not in self.current_collection.children:  
+                self.current_collection.children.link(group)
         return group
 
     def _call_object_types(self, TYPE, entities, group, name, scene, separated=False):
@@ -1629,7 +1672,12 @@ class Do:
             scene['SRID'] = re.findall(r"\+init=(.+)\s", self.pScene.srs)[0]
 
         #bpy.context.window.scene = scene
-
+        # 在导入完成后，将所有图层组的材质链接到当前场景
+        for layer_name in self.dwg.layers:
+            group = self._get_group(layer_name)
+            if group:
+                for obj in group.objects:
+                    obj.data.materials.append(self._get_or_create_material(layer_name))
         return self.errors
         # trying to import dimensions:
         # self.separated_objects((block for block in self.dwg.blocks if block.name.startswith("*")))
